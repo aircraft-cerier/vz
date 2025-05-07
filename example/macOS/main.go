@@ -13,12 +13,25 @@ import (
 	"github.com/Code-Hex/vz/v3"
 )
 
-var install bool
-var nbdURL string
+var (
+	install    bool
+	recovery   bool
+	headless   bool
+	nbdURL     string
+	cpu        uint
+	mem        uint64
+	macAddr    *vz.MACAddress
+	bundleName string
+)
 
 func init() {
 	flag.BoolVar(&install, "install", false, "run command as install mode")
+	flag.BoolVar(&recovery, "recovery", false, "boot VM into recovery mode")
+	flag.BoolVar(&headless, "headless", false, "boot VM without a GUI")
 	flag.StringVar(&nbdURL, "nbd-url", "", "nbd url (e.g. nbd+unix:///export?socket=nbd.sock)")
+	flag.UintVar(&cpu, "cpu", 0, "CPU to use for VM, default is Total cores minus 1")
+	flag.Uint64Var(&mem, "mem", 0, "Memory to use, default is 120gb")
+	flag.StringVar(&bundleName, "bundlename", "", "Name of vm bundle to start, defaults to VM")
 }
 
 func main() {
@@ -33,7 +46,98 @@ func run(ctx context.Context) error {
 	if install {
 		return installMacOS(ctx)
 	}
+	if recovery {
+		return runRecoveryVM(ctx)
+	}
 	return runVM(ctx)
+}
+
+func runRecoveryVM(ctx context.Context) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	platformConfig, err := createMacPlatformConfiguration()
+	if err != nil {
+		return err
+	}
+	config, err := setupVMConfiguration(platformConfig)
+	if err != nil {
+		return err
+	}
+	vm, err := vz.NewVirtualMachine(config)
+	if err != nil {
+		return err
+	}
+
+	if err := vm.Start(vz.WithStartUpFromMacOSRecovery(true)); err != nil {
+		return err
+	}
+
+	errCh := make(chan error, 1)
+
+	go func() {
+		for {
+			select {
+			case newState := <-vm.StateChangedNotify():
+				if newState == vz.VirtualMachineStateRunning {
+					log.Println("start VM is running")
+				}
+				if newState == vz.VirtualMachineStateStopped || newState == vz.VirtualMachineStateStopping {
+					log.Println("stopped state")
+					errCh <- nil
+					return
+				}
+			case err := <-errCh:
+				errCh <- fmt.Errorf("failed to start vm: %w", err)
+				return
+			}
+		}
+	}()
+
+	// it start listening to the NBD server, if any
+	nbdAttachment := retrieveNetworkBlockDeviceStorageDeviceAttachment(config.StorageDevices())
+	if nbdAttachment != nil {
+		go func() {
+			for {
+				select {
+				case err := <-nbdAttachment.DidEncounterError():
+					log.Printf("NBD client has been encountered error: %v\n", err)
+				case <-nbdAttachment.Connected():
+					log.Println("NBD client connected with the server")
+				}
+			}
+		}()
+	}
+
+	// cleanup is this function is useful when finished graphic application.
+	cleanup := func() {
+		for i := 1; vm.CanRequestStop(); i++ {
+			result, err := vm.RequestStop()
+			log.Printf("sent stop request(%d): %t, %v", i, result, err)
+			time.Sleep(time.Second * 3)
+			if i > 3 {
+				log.Println("call stop")
+				if err := vm.Stop(); err != nil {
+					log.Println("stop with error", err)
+					return
+				}
+				// if err := vm.Pause(); err != nil {
+				// 	log.Println("pause with error", err)
+				// 	return
+				// }
+				// if err := vm.SaveMachineStateToPath("savestate"); err != nil {
+				// 	log.Println("save state with error", err)
+				// }
+			}
+		}
+		log.Println("finished cleanup")
+	}
+
+	vm.StartGraphicApplication(960, 600, vz.WithWindowTitle("macOS"), vz.WithController(true))
+
+	cleanup()
+
+	return <-errCh
 }
 
 func runVM(ctx context.Context) error {
@@ -117,7 +221,9 @@ func runVM(ctx context.Context) error {
 		log.Println("finished cleanup")
 	}
 
-	vm.StartGraphicApplication(960, 600, vz.WithWindowTitle("macOS"), vz.WithController(true))
+	if !headless {
+		vm.StartGraphicApplication(960, 600, vz.WithWindowTitle("macOS"), vz.WithController(true))
+	}
 
 	cleanup()
 
@@ -129,6 +235,9 @@ func computeCPUCount() uint {
 	virtualCPUCount := uint(totalAvailableCPUs - 1)
 	if virtualCPUCount <= 1 {
 		virtualCPUCount = 1
+	}
+	if cpu != 0 {
+		virtualCPUCount = cpu
 	}
 	// TODO(codehex): use generics function when deprecated Go 1.17
 	maxAllowed := vz.VirtualMachineConfigurationMaximumAllowedCPUCount()
@@ -144,7 +253,10 @@ func computeCPUCount() uint {
 
 func computeMemorySize() uint64 {
 	// We arbitrarily choose 4GB.
-	memorySize := uint64(4 * 1024 * 1024 * 1024)
+	memorySize := uint64(120 * 1024 * 1024 * 1024)
+	if mem != 0 {
+		memorySize = uint64(mem * 1024 * 1024 * 1024)
+	}
 	maxAllowed := vz.VirtualMachineConfigurationMaximumAllowedMemorySize()
 	if memorySize > maxAllowed {
 		memorySize = maxAllowed
@@ -157,8 +269,8 @@ func computeMemorySize() uint64 {
 }
 
 func createBlockDeviceConfiguration(diskPath string) (*vz.VirtioBlockDeviceConfiguration, error) {
-	// create disk image with 64 GiB
-	if err := vz.CreateDiskImage(diskPath, 64*1024*1024*1024); err != nil {
+	// create disk image with 256 GiB
+	if err := vz.CreateDiskImage(diskPath, 1600*1024*1024*1024); err != nil {
 		if !os.IsExist(err) {
 			return nil, fmt.Errorf("failed to create disk image: %w", err)
 		}
@@ -305,6 +417,14 @@ func setupVMConfiguration(platformConfig vz.PlatformConfiguration) (*vz.VirtualM
 	if err != nil {
 		return nil, fmt.Errorf("failed to create network device configuration: %w", err)
 	}
+
+	macAddr, err = vz.NewRandomLocallyAdministeredMACAddress()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create random MAC Address: %w", err)
+	}
+	log.Println("MAC Address is: ", macAddr.String())
+	networkDeviceConfig.SetMACAddress(macAddr)
+
 	config.SetNetworkDevicesVirtualMachineConfiguration([]*vz.VirtioNetworkDeviceConfiguration{
 		networkDeviceConfig,
 	})

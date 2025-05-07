@@ -8,7 +8,7 @@ import (
 
 // CreateVMBundle creates macOS VM bundle path if not exists.
 func CreateVMBundle() error {
-	return os.MkdirAll(GetVMBundlePath(), 0777)
+	return os.MkdirAll(GetVMBundlePath(), 0o777)
 }
 
 // GetVMBundlePath gets macOS VM bundle path.
@@ -17,7 +17,12 @@ func GetVMBundlePath() string {
 	if err != nil {
 		panic(err) //
 	}
-	return filepath.Join(home, "/VM.bundle/")
+	if bundleName != "" {
+		bundleName = bundleName + ".bundle/"
+		return filepath.Join(home, "/VM.bundle/")
+	} else {
+		return filepath.Join(home, "/VM.bundle/")
+	}
 }
 
 // GetAuxiliaryStoragePath gets a path for auxiliary storage.
@@ -42,7 +47,11 @@ func GetMachineIdentifierPath() string {
 
 // GetRestoreImagePath gets a path for restore image file.
 func GetRestoreImagePath() string {
-	return filepath.Join(GetVMBundlePath(), "RestoreImage.ipsw")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		panic(err) //
+	}
+	return filepath.Join(home, "/Downloads/", "UniversalMac_15.3.2_24D81_Restore.ipsw")
 }
 
 // CreateFileAndWriteTo creates a new file and write data to it.
