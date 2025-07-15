@@ -18,8 +18,8 @@ func GetVMBundlePath() string {
 		panic(err) //
 	}
 	if bundleName != "" {
-		bundleName = bundleName + ".bundle/"
-		return filepath.Join(home, "/VM.bundle/")
+		bundleName = bundleName + "/"
+		return filepath.Join(home, bundleName)
 	} else {
 		return filepath.Join(home, "/VM.bundle/")
 	}
@@ -51,7 +51,11 @@ func GetRestoreImagePath() string {
 	if err != nil {
 		panic(err) //
 	}
-	return filepath.Join(home, "/Downloads/", "UniversalMac_15.3.2_24D81_Restore.ipsw")
+	if ipsw != "" {
+		return filepath.Join(home, ipsw)
+	} else {
+		return filepath.Join(GetVMBundlePath(), "RestoreImage.ipsw")
+	}
 }
 
 // CreateFileAndWriteTo creates a new file and write data to it.

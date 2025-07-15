@@ -7,7 +7,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
+	"regexp"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Code-Hex/vz/v3"
@@ -16,22 +20,26 @@ import (
 var (
 	install    bool
 	recovery   bool
-	headless   bool
 	nbdURL     string
 	cpu        uint
 	mem        uint64
 	macAddr    *vz.MACAddress
+	gui        bool
 	bundleName string
+	ipsw       string
+	vmShare    string
 )
 
 func init() {
 	flag.BoolVar(&install, "install", false, "run command as install mode")
 	flag.BoolVar(&recovery, "recovery", false, "boot VM into recovery mode")
-	flag.BoolVar(&headless, "headless", false, "boot VM without a GUI")
 	flag.StringVar(&nbdURL, "nbd-url", "", "nbd url (e.g. nbd+unix:///export?socket=nbd.sock)")
 	flag.UintVar(&cpu, "cpu", 0, "CPU to use for VM, default is Total cores minus 1")
 	flag.Uint64Var(&mem, "mem", 0, "Memory to use, default is 120gb")
-	flag.StringVar(&bundleName, "bundlename", "", "Name of vm bundle to start, defaults to VM")
+	flag.StringVar(&bundleName, "bundle", "", "Name of vm bundle to start, defaults to VM")
+	flag.BoolVar(&gui, "gui", false, "Whether to start a GUI for interacting,")
+	flag.StringVar(&ipsw, "ipsw", "", "Name of ipsw to install")
+	flag.StringVar(&vmShare, "vmshare", "", "Directory to mount to VM")
 }
 
 func main() {
@@ -141,8 +149,10 @@ func runRecoveryVM(ctx context.Context) error {
 }
 
 func runVM(ctx context.Context) error {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
+	if gui {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+	}
 
 	platformConfig, err := createMacPlatformConfiguration()
 	if err != nil {
@@ -197,35 +207,50 @@ func runVM(ctx context.Context) error {
 		}()
 	}
 
-	// cleanup is this function is useful when finished graphic application.
-	cleanup := func() {
-		for i := 1; vm.CanRequestStop(); i++ {
-			result, err := vm.RequestStop()
-			log.Printf("sent stop request(%d): %t, %v", i, result, err)
-			time.Sleep(time.Second * 3)
-			if i > 3 {
-				log.Println("call stop")
-				if err := vm.Stop(); err != nil {
-					log.Println("stop with error", err)
-					return
-				}
-				// if err := vm.Pause(); err != nil {
-				// 	log.Println("pause with error", err)
-				// 	return
-				// }
-				// if err := vm.SaveMachineStateToPath("savestate"); err != nil {
-				// 	log.Println("save state with error", err)
-				// }
+	if !gui {
+		for i := 1; i <= 15; i++ {
+			vmIPAddr, err := getIPByMAC(macAddr)
+			if err == nil {
+				log.Println("VM's IP Address is: ", vmIPAddr)
+				break
+			}
+			if i < 15 {
+				time.Sleep(2 * time.Second)
+			} else {
+				log.Println("Failed to get IP Address of VM: %w after 30 seconds", "err", err)
+				return err
 			}
 		}
-		log.Println("finished cleanup")
-	}
+	} else {
+		log.Println("Starting with GUI")
+		// cleanup is this function is useful when finished graphic application.
+		cleanup := func() {
+			for i := 1; vm.CanRequestStop(); i++ {
+				result, err := vm.RequestStop()
+				log.Printf("sent stop request(%d): %t, %v", i, result, err)
+				time.Sleep(time.Second * 3)
+				if i > 3 {
+					log.Println("call stop")
+					if err := vm.Stop(); err != nil {
+						log.Println("stop with error", err)
+						return
+					}
+					// if err := vm.Pause(); err != nil {
+					// 	log.Println("pause with error", err)
+					// 	return
+					// }
+					// if err := vm.SaveMachineStateToPath("savestate"); err != nil {
+					// 	log.Println("save state with error", err)
+					// }
+				}
+			}
+			log.Println("finished cleanup")
+		}
 
-	if !headless {
 		vm.StartGraphicApplication(960, 600, vz.WithWindowTitle("macOS"), vz.WithController(true))
-	}
 
-	cleanup()
+		cleanup()
+	}
 
 	return <-errCh
 }
@@ -270,7 +295,7 @@ func computeMemorySize() uint64 {
 
 func createBlockDeviceConfiguration(diskPath string) (*vz.VirtioBlockDeviceConfiguration, error) {
 	// create disk image with 256 GiB
-	if err := vz.CreateDiskImage(diskPath, 1600*1024*1024*1024); err != nil {
+	if err := vz.CreateDiskImage(diskPath, 160*1024*1024*1024); err != nil {
 		if !os.IsExist(err) {
 			return nil, fmt.Errorf("failed to create disk image: %w", err)
 		}
@@ -422,7 +447,6 @@ func setupVMConfiguration(platformConfig vz.PlatformConfiguration) (*vz.VirtualM
 	if err != nil {
 		return nil, fmt.Errorf("failed to create random MAC Address: %w", err)
 	}
-	log.Println("MAC Address is: ", macAddr.String())
 	networkDeviceConfig.SetMACAddress(macAddr)
 
 	config.SetNetworkDevicesVirtualMachineConfiguration([]*vz.VirtioNetworkDeviceConfiguration{
@@ -457,6 +481,26 @@ func setupVMConfiguration(platformConfig vz.PlatformConfiguration) (*vz.VirtualM
 		audioDeviceConfig,
 	})
 
+	if vmShare != "" {
+		shareDir, err := vz.NewSharedDirectory("/Users/devicelab/vmshare", true)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create directory share: %w", err)
+		}
+		singleDirShare, err := vz.NewSingleDirectoryShare(shareDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create signle directory share: %w", err)
+		}
+		sharedDir, err := vz.NewVirtioFileSystemDeviceConfiguration("vmshare")
+		if err != nil {
+			return nil, err
+		}
+		sharedDir.SetDirectoryShare(singleDirShare)
+
+		config.SetDirectorySharingDevicesVirtualMachineConfiguration([]vz.DirectorySharingDeviceConfiguration{
+			sharedDir,
+		})
+	}
+
 	validated, err := config.Validate()
 	if err != nil {
 		return nil, fmt.Errorf("failed to validate configuration: %w", err)
@@ -482,4 +526,46 @@ func retrieveNetworkBlockDeviceStorageDeviceAttachment(storages []vz.StorageDevi
 		}
 	}
 	return nil
+}
+
+func getIPByMAC(mac *vz.MACAddress) (ipAddr string, err error) {
+	// Normalize MAC to lowercase for comparison
+	macAddr := strings.ToLower(mac.String())
+	macRegex := regexp.MustCompile(`([0-9a-f]{1,2}[:-]){5}[0-9a-f]{1,2}`)
+	for i := 1; i <= 15; i++ {
+		out, err := exec.Command("arp", "-a").Output()
+		if err != nil {
+			return "", err
+		}
+
+		lines := strings.Split(string(out), "\n")
+		for _, line := range lines {
+			foundMAC := macRegex.FindString(strings.ToLower(line))
+			if normalizeMAC(foundMAC) == normalizeMAC(macAddr) {
+				// Try extracting the IP from parentheses
+				re := regexp.MustCompile(`\(([^)]+)\)`)
+				match := re.FindStringSubmatch(line)
+				if len(match) > 1 {
+					return match[1], nil
+				}
+			}
+		}
+		if i < 15 {
+			time.Sleep(2 * time.Second)
+		}
+	}
+	return "", fmt.Errorf("MAC address %s not found in ARP table", mac)
+}
+
+func normalizeMAC(mac string) string {
+	parts := regexp.MustCompile(`[:-]`).Split(strings.ToLower(mac), -1)
+	for i := range parts {
+		parts[i] = fmt.Sprintf("%02x", parseHex(parts[i]))
+	}
+	return strings.Join(parts, ":")
+}
+
+func parseHex(s string) int {
+	n, _ := strconv.ParseInt(s, 16, 0)
+	return int(n)
 }
