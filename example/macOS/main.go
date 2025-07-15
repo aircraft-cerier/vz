@@ -23,6 +23,7 @@ var (
 	nbdURL     string
 	cpu        uint
 	mem        uint64
+	disk       int64
 	macAddr    *vz.MACAddress
 	gui        bool
 	bundleName string
@@ -36,6 +37,7 @@ func init() {
 	flag.StringVar(&nbdURL, "nbd-url", "", "nbd url (e.g. nbd+unix:///export?socket=nbd.sock)")
 	flag.UintVar(&cpu, "cpu", 0, "CPU to use for VM, default is Total cores minus 1")
 	flag.Uint64Var(&mem, "mem", 0, "Memory to use, default is 120gb")
+	flag.Uint64Var(&mem, "disk", 0, "Disk size to create, default is 160gb")
 	flag.StringVar(&bundleName, "bundle", "", "Name of vm bundle to start, defaults to VM")
 	flag.BoolVar(&gui, "gui", false, "Whether to start a GUI for interacting,")
 	flag.StringVar(&ipsw, "ipsw", "", "Name of ipsw to install")
@@ -294,8 +296,12 @@ func computeMemorySize() uint64 {
 }
 
 func createBlockDeviceConfiguration(diskPath string) (*vz.VirtioBlockDeviceConfiguration, error) {
-	// create disk image with 256 GiB
-	if err := vz.CreateDiskImage(diskPath, 160*1024*1024*1024); err != nil {
+	// create disk image with specified disk size in GiB (default is 160)
+	diskSize := int64(160)
+	if disk != 0 {
+		diskSize = disk
+	}
+	if err := vz.CreateDiskImage(diskPath, diskSize*1024*1024*1024); err != nil {
 		if !os.IsExist(err) {
 			return nil, fmt.Errorf("failed to create disk image: %w", err)
 		}
