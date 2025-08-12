@@ -37,7 +37,7 @@ func init() {
 	flag.StringVar(&nbdURL, "nbd-url", "", "nbd url (e.g. nbd+unix:///export?socket=nbd.sock)")
 	flag.UintVar(&cpu, "cpu", 0, "CPU to use for VM, default is Total cores minus 1")
 	flag.Uint64Var(&mem, "mem", 0, "Memory to use, default is 120gb")
-	flag.Uint64Var(&mem, "disk", 0, "Disk size to create, default is 160gb")
+	flag.Int64Var(&disk, "disk", 0, "Disk size to create, default is 160gb")
 	flag.StringVar(&bundleName, "bundle", "", "Name of vm bundle to start, defaults to VM")
 	flag.BoolVar(&gui, "gui", false, "Whether to start a GUI for interacting,")
 	flag.StringVar(&ipsw, "ipsw", "", "Name of ipsw to install")
